@@ -2,6 +2,9 @@
 # VTStats
 VT Enterprise Quotas and Usage Statistics macOS menubar app. 
 The purpose of app to monitor Virustotal Intelligence Enterprise resources usage. Uses https://www.virustotal.com/api/v3/users/api-key/overall_quotas API to fetch statistics. Currently only grabs inherited from VTI group usage data.
+
+![VTStats](https://raw.githubusercontent.com/nikolay-n/VTStats/main/shots/001.png)
+
 ## Instalation
      mkdir ~/Tools; cd ~/Tools
      
@@ -9,7 +12,10 @@ The purpose of app to monitor Virustotal Intelligence Enterprise resources usage
      
      cd ~/Tools/VTStats
      
-     # copy LaunchAgent template
+.....# to launch
+....../vtstats
+     
+     # To setup LaunchAgent, copy LaunchAgent template
      cp ./LaunchAgents/com.gorelics.VTStats.plist ~/Library/LaunchAgents/
      
      # replace /absolute/path/to/vtstats with real path
