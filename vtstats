@@ -1,0 +1,482 @@
+#!/usr/bin/pythonw2.7
+# -*- coding: utf-8 -*-
+
+from __future__ import print_function
+import sys
+import os
+import json
+from six.moves import urllib
+from AppKit import NSUserDefaults
+from Foundation import NSBundle, NO
+import objc
+from itertools import cycle, izip
+import base64
+import hashlib
+
+app_dir = os.path.dirname(os.path.realpath(__file__))
+lib_dir = os.path.join(app_dir, "lib")
+if os.path.exists(lib_dir):
+    sys.path.append(lib_dir)
+
+import rumps
+
+app_name = "VTStats"
+app_version = "1.0"
+app_desc = "VT Enterprise Quotas and Usage Statistics v{}".format(app_version)
+app_bundle_id = "com.gorelics.VTStats"
+
+color_gain = {
+    "green": "Low",
+    "orange": "Mid",
+    "red": "High"
+}
+
+
+def nop(sender):
+    pass
+
+
+def percent_to_color(num):
+    colors = ["green", "orange", "red"]
+    colors_count = len(colors)
+    idx = int((colors_count * num) / 100)
+    if idx >= colors_count:
+        idx = colors_count - 1
+    return colors[idx]
+
+
+class Preferences:
+    def __init__(self, domain):
+        self.domain = domain
+        self.defaults = NSUserDefaults.standardUserDefaults()
+        self.serial_number = self._get_serial()
+
+    # encryption is just for fun
+    def _encrypt(self, value):
+        data = json.dumps([value])
+        return base64.encodestring(self._xor(data, self.serial_number)).strip()
+
+    def _decrypt(self, value):
+        data = self._xor(base64.decodestring(value), self.serial_number)
+        try:
+            obj = json.loads(data)
+            return obj[0]
+        except Exception:
+            pass
+
+    def _get_serial(self):
+        """Uses pyObjC to get serial number, thanks to Michael Lynn"""
+        iokit_bundle = NSBundle.bundleWithIdentifier_("com.apple.framework.IOKit")
+        functions = [("IOServiceGetMatchingService", b"II@"),
+                     ("IOServiceMatching", b"@*"),
+                     ("IORegistryEntryCreateCFProperty", b"@I@@I")]
+        # pylint: disable=E1101
+        objc.loadBundleFunctions(iokit_bundle, globals(), functions)
+        kiomasterport_default = 0
+        kioplatformserialnumberkey = 'IOPlatformSerialNumber'
+        kcfallocatordefault = None
+        # pylint: disable=E0602
+        platformexpert = IOServiceGetMatchingService(kiomasterport_default, \
+                                                     IOServiceMatching("IOPlatformExpertDevice"))
+        serial = IORegistryEntryCreateCFProperty(platformexpert, \
+                                                 kioplatformserialnumberkey, kcfallocatordefault, 0)
+        return serial
+
+    def _xor(self, data, key):
+        return ''.join(chr(ord(x) ^ ord(y)) for (x, y) in izip(data, cycle(key)))
+
+    def get_pref(self, key=None, encrypt=False):
+        prefs = dict()
+        ns_dict = self.defaults.persistentDomainForName_(self.domain)
+        if ns_dict is not None:
+            prefs = dict(ns_dict)
+        if key is None:
+            return prefs
+        else:
+            if key in prefs:
+                if encrypt:
+                    return self._decrypt(prefs[key])
+                else:
+                    return prefs[key]
+        return None
+
+    def set_pref(self, value, key=None, encrypt=False):
+        prefs = self.get_pref()
+        if key is not None:
+            if encrypt:
+                prefs[key] = self._encrypt(value)
+            else:
+                prefs[key] = value
+        elif type(value) == object:
+            prefs = value
+        else:
+            return
+
+        self.defaults.setPersistentDomain_forName_(prefs, self.domain)
+        self.defaults.synchronize()
+
+
+class VtApi:
+    user_agent = "VirusTotal"
+    api_url = "https://www.virustotal.com/api/v3"
+
+    def __init__(self, api_key=None):
+        if api_key is not None:
+            self.api_key = api_key
+        self.last_code = None
+
+    def get_stats(self, user_or_key=None):
+        if user_or_key is None:
+            user_or_key = self.api_key
+
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "x-apikey": self.api_key
+        }
+        url = "{}/users/{}/overall_quotas".format(self.api_url, user_or_key)
+        req = urllib.request.Request(url, headers=headers)
+        stats = None
+        try:
+            res = urllib.request.urlopen(req)
+            body = res.read()
+            stats = json.loads(body)
+            self.last_code = res.code
+            # with open("data.json", "r") as f:
+            #     stats = json.load(f)
+            # self.last_code = 200
+        except urllib.error.HTTPError as e:
+            self.last_code = e.code
+        except Exception:
+            pass
+
+        return stats
+
+    def is_unauthorized(self):
+        return self.last_code in [401, 403]
+
+    def is_not_found(self):
+        return self.last_code == 404
+
+
+class VTStatsAnalysis:
+    current_month = "Consumption Current Month:"
+    fields_name_map = {
+        "cases_creation_monthly": "Cases",
+        "intelligence_vtdiff_creation_monthly": "Diff",
+        "monitor_uploaded_files": "Monitor Files",
+        "monitor_uploaded_bytes": "Monitor Bytes",
+        "monitor_storage_files": "Monitor Storage Files",
+        "api_requests_monthly": "Requests",
+        "intelligence_downloads_monthly": "Downloads",
+        "api_requests_hourly": "Requests (hourly)",
+        "intelligence_hunting_rules": "Livehunt Rules",
+        "intelligence_graphs_private": "Graphs Private",
+        "api_requests_daily": "Requests (daily)",
+        "monitor_storage_bytes": "Monitor Storage Bytes",
+        "intelligence_retrohunt_jobs_monthly": "Retrohunt",
+        "intelligence_searches_monthly": "Searches"
+    }
+    # total must be 100%, use only fields from this array
+    fields_score = [
+        ("intelligence_searches_monthly", 40),
+        ("intelligence_downloads_monthly", 40),
+        ("intelligence_hunting_rules", 5),
+        ("intelligence_retrohunt_jobs_monthly", 5),
+        ("intelligence_vtdiff_creation_monthly", 5),
+        ("api_requests_monthly", 5)
+    ]
+
+    def __init__(self, data):
+        self.data = data
+
+    def get_section_num(self, val, total, percent):
+        num_sections = int(100 / percent)
+        val_percent = float(val) / float(total) * 100
+        section = int(float(num_sections) / 100 * val_percent) + 1
+        return 0 if section > num_sections else section 
+
+    def get_notify_items(self, notify_data, usage_amount):
+        if not self.data:
+            return
+
+        notify_items = []
+        for item in self.fields_score:
+            field, score = item
+            try:
+                group = self.data["data"][field]["group"]
+            except Exception:
+                continue
+            used = group["used"]
+            allowed = group["allowed"]
+            last_used = notify_data[field]
+            last_section = self.get_section_num(last_used, allowed, usage_amount)
+            section = self.get_section_num(used, allowed, usage_amount)
+            if last_section != section:
+                usage = int(float(used) / float(allowed) * 100)
+                notify_items.append({
+                    "field": field,
+                    "field_name": self.fields_name_map[field],
+                    "used": used,
+                    "allowed": allowed,
+                    "usage": usage
+                })
+
+        return notify_items
+
+    def get_all_used(self):
+        if not self.data:
+            return
+        result = {}
+        for item in self.fields_score:
+            field, score = item
+            try:
+                group = self.data["data"][field]["group"]
+            except Exception:
+                continue
+            result[field] = group["used"]
+        return result
+
+    def get_total_usage(self):
+        if not self.data:
+            return
+        result = 0
+        for item in self.fields_score:
+            field, score = item
+            try:
+                group = self.data["data"][field]["group"]
+            except Exception:
+                continue
+            used = group["used"]
+            allowed = group["allowed"]
+            usage = 100 * float(used)/float(allowed) 
+            result += usage * score / 100
+
+        return result
+
+    def render_menu(self):
+        if not self.data:
+            return
+
+        menus = [
+            rumps.separator,
+            rumps.MenuItem(self.current_month),
+        ]
+        for item in self.fields_score:
+            field = item[0]
+            try:
+                group = self.data["data"][field]["group"]
+            except Exception:
+                continue
+            used = group["used"]
+            allowed = group["allowed"]
+            usage = 100 * float(used)/float(allowed)
+            menu = rumps.MenuItem(" {}: {} / {}".format(
+                self.fields_name_map[field], 
+                used, 
+                allowed
+            ), callback=nop, icon="icons/{}.png".format(percent_to_color(usage)), dimensions=[12, 12])
+            menus.append(menu)
+        if len(menus) == 2:
+            return
+        return menus
+
+
+class VTStats(object):
+    def __init__(self):
+        bundle = NSBundle.mainBundle()
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        info['CFBundleName'] = app_name
+        info['CFBundleIdentifier'] = app_bundle_id
+        info['LSUIElement'] = True
+        info['NSRequiresAquaSystemAppearance'] = False
+        # info['CFBundleIconFile'] = "icons/virustotal.icns"
+
+        self.app = rumps.App(app_name, quit_button=None)
+        self.prefs = Preferences(app_bundle_id)
+        self.vt_api = None
+        self.vt_stats_info = None
+
+        self.api_key = self.prefs.get_pref("ApiKey", encrypt=True)
+        self.user_id = self.prefs.get_pref("UserID", encrypt=True)
+        self.stats = self.prefs.get_pref("CachedStats")
+        self.notify_usage = self.prefs.get_pref("NotifyUsage")
+        self.update_interval = self.prefs.get_pref("UpdateInterval") or 0
+
+        self.timer = None
+
+        if self.api_key:
+            self.vt_api = VtApi(self.api_key)
+
+        self.app.title = ""
+
+        self.menu_update = rumps.MenuItem("Update statistics", callback=self.update)
+        self.menu_prefs = rumps.MenuItem("Preferences")
+
+        self.menu_prefs_api_key = rumps.MenuItem("Set API key", callback=self.set_api_key)
+        self.menu_prefs_user_id = rumps.MenuItem("Set User ID", callback=self.set_user_id)
+        self.menu_prefs_interval = rumps.MenuItem("Set Update Interval", callback=self.set_update_interval)
+        self.menu_prefs_notify = rumps.MenuItem("Usage Notifications", callback=self.set_notify_usage_amount)
+
+        self.menu_prefs.add(self.menu_prefs_api_key)
+        self.menu_prefs.add(self.menu_prefs_user_id)
+        self.menu_prefs.add(self.menu_prefs_interval)
+        self.menu_prefs.add(self.menu_prefs_notify)
+
+        self.update()
+        self.set_timer()
+
+    def ask_pref_dialog(self, message, default):
+        setting_window = rumps.Window(
+            message=message,
+            title='Preferences',
+            default_text=default,
+            ok="Submit",
+            cancel='Cancel',
+            dimensions=(300, 20)
+        )
+        setting_window.icon = "icons/virustotal.png"
+        resp = setting_window.run()
+        if resp.clicked:
+            return resp.text
+        return None
+
+    def set_update_interval(self, sender):
+        old_interval = self.update_interval
+        new_interval = self.ask_pref_dialog('Set Update Interval (in seconds, 0 to disable)', old_interval)
+        if new_interval is not None:
+            new_interval = int(new_interval)
+            if new_interval != old_interval:
+                self.update_interval = new_interval
+                self.prefs.set_pref(new_interval, "UpdateInterval")
+                self.update_menu()
+                self.set_timer()
+
+    def set_notify_usage_amount(self, sender):
+        old_amount = self.notify_usage or 0
+        new_amount = self.ask_pref_dialog('Notify on every amount used % (from 0 to 100, 0 to disable)', old_amount)
+        if new_amount is not None:
+            new_amount = int(new_amount)
+            if new_amount != old_amount:
+                self.notify_usage = new_amount
+                self.prefs.set_pref(self.notify_usage, "NotifyUsage")
+                self.update_menu()
+
+    def set_timer(self):
+        if self.update_interval == 0:
+            if self.timer:
+                self.timer.stop()
+                self.timer = None
+            return
+        if self.timer:
+            if self.timer.interval != self.update_interval:
+                self.timer.stop()
+                self.timer.interval = self.update_interval
+                self.timer.start()
+        else:
+            self.timer = rumps.Timer(self.update, self.update_interval)
+            self.timer.start()
+
+    def set_api_key(self, sender):
+        old_api_key = self.api_key or ""
+        new_api_key = self.ask_pref_dialog('Set API Key', old_api_key)
+        if new_api_key is not None and new_api_key != old_api_key:
+            self.api_key = new_api_key
+            self.prefs.set_pref(self.api_key, "ApiKey", encrypt=True)
+            if self.user_id is None or self.user_id == old_api_key:
+                self.user_id = new_api_key
+                self.prefs.set_pref(self.user_id, "UserID", encrypt=True)
+
+            self.update()
+
+    def update(self, sender=None):
+        self.update_stats()
+        self.update_icon()
+        self.update_menu()
+        self.notify()
+
+    def notify(self):
+        notify_data = self.prefs.get_pref("NotifyData")
+        if notify_data is None:
+            notify_data = self.vt_stats_info.get_all_used()
+            self.prefs.set_pref(notify_data, "NotifyData")
+            return
+        items = self.vt_stats_info.get_notify_items(notify_data, self.notify_usage)
+        if len(items):
+            notify_data = self.vt_stats_info.get_all_used()
+            self.prefs.set_pref(notify_data, "NotifyData")
+            for item in items:
+                color = percent_to_color(item["usage"])
+                gain = color_gain[color]
+                title = "{} - {} Usage Alert".format(app_name, gain)
+                subtitle = "{} usage statistics:".format(item["field_name"])
+                message = "Used {} from {} allowed. Usage {}%".format(item["used"], item["allowed"], item["usage"])
+                rumps.notification(title, subtitle, message, icon="icons/virustotal-{}.png".format(color))
+
+    def set_user_id(self, sender):
+        old_user_id = self.user_id or ""
+        new_user_id = self.ask_pref_dialog('Set User ID or API Key', old_user_id)
+        if new_user_id is not None and new_user_id != old_user_id or new_user_id == "":
+            self.user_id = new_user_id or self.api_key
+            self.prefs.set_pref(self.user_id, "UserID", encrypt=True)
+            self.update()
+
+    def update_icon(self):
+        if self.vt_stats_info:
+            color = percent_to_color(self.vt_stats_info.get_total_usage())
+            if not self.app.icon or color not in self.app.icon:
+                self.app.icon = "icons/virustotal-{}.png".format(color)
+        else:
+            if self.vt_api and self.vt_api.is_unauthorized() or self.vt_api.is_not_found():
+                self.app.icon = "icons/virustotal-gray.png"
+            else:
+                self.app.icon = "icons/virustotal.png"
+
+    def update_menu(self):
+        self.menu_prefs_api_key.state = 1 if self.api_key else 0
+        self.menu_prefs_interval.state = 1 if self.update_interval else 0
+        self.menu_prefs_user_id.state = 1 if self.user_id else 0
+        self.menu_prefs_notify.state = 1 if self.notify_usage else 0
+
+        if self.vt_api and self.vt_api.is_unauthorized() or self.vt_api.is_not_found():
+            self.menu_update.set_callback(None)
+        elif not self.vt_api:
+            self.menu_update.set_callback(None)
+        else:
+            self.menu_update.set_callback(self.update)
+
+        self.app.menu.clear()
+        menu = [rumps.MenuItem(app_desc, callback=nop)]
+        if self.vt_stats_info:
+            stats_menu = self.vt_stats_info.render_menu()
+            menu.extend(stats_menu)
+
+        menu.extend([
+            rumps.separator,
+            self.menu_update, 
+            rumps.separator, 
+            self.menu_prefs, 
+            rumps.MenuItem('Quit', callback=rumps.quit_application, key='q')
+        ])
+        self.app.menu = menu
+
+    def update_stats(self, sender=None):
+        if not self.api_key:
+            if self.vt_stats_info:
+                self.vt_stats_info = None
+            return
+
+        if not self.vt_api or self.vt_api.api_key != self.api_key:
+            self.vt_api = VtApi(self.api_key)
+        data = self.vt_api.get_stats(self.user_id)
+        if data is not None:
+            self.vt_stats_info = VTStatsAnalysis(data)
+        elif self.vt_api.is_unauthorized() or self.vt_api.is_not_found():
+            self.vt_stats_info = None
+
+    def run(self):
+        self.app.run()
+
+
+if __name__ == "__main__":
+    VTStats().run()
