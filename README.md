@@ -12,8 +12,8 @@ The purpose of app to monitor Virustotal Intelligence Enterprise resources usage
      
      cd ~/Tools/VTStats
      
-.....# to launch
-....../vtstats
+     # to launch
+     ./vtstats
      
      # To setup LaunchAgent, copy LaunchAgent template
      cp ./LaunchAgents/com.gorelics.VTStats.plist ~/Library/LaunchAgents/
@@ -23,8 +23,8 @@ The purpose of app to monitor Virustotal Intelligence Enterprise resources usage
      
      # load LaunchAgent
      launchctl load -w ~/LaunchAgents/com.gorelics.VTStats.plist
-	 
-	 # start or stop
+     
+     # start or stop
      launchctl stop com.gorelics.VTStats
      launchctl start com.gorelics.VTStats
 ## Features
