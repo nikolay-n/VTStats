@@ -197,7 +197,7 @@ class VTStatsAnalysis:
         return 0 if section > num_sections else section 
 
     def get_notify_items(self, notify_data, usage_amount):
-        if not self.data:
+        if not self.data and not notify_data and usage_amount is None:
             return
 
         notify_items = []
@@ -397,6 +397,8 @@ class VTStats(object):
 
     def notify(self):
         notify_data = self.prefs.get_pref("NotifyData")
+        if self.notify_usage is None or self.notify_usage == 0:
+            return
         if notify_data is None:
             if self.vt_stats_info is None:
                 return
