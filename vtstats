@@ -398,8 +398,8 @@ class VTStats(object):
     def notify(self):
         notify_data = self.prefs.get_pref("NotifyData")
         if notify_data is None:
-        if self.vt_stats_info is None:
-        return
+            if self.vt_stats_info is None:
+                return
             notify_data = self.vt_stats_info.get_all_used()
             self.prefs.set_pref(notify_data, "NotifyData")
             return
