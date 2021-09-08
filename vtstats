@@ -398,6 +398,8 @@ class VTStats(object):
     def notify(self):
         notify_data = self.prefs.get_pref("NotifyData")
         if notify_data is None:
+        if self.vt_stats_info is None:
+        return
             notify_data = self.vt_stats_info.get_all_used()
             self.prefs.set_pref(notify_data, "NotifyData")
             return
@@ -427,7 +429,7 @@ class VTStats(object):
             if not self.app.icon or color not in self.app.icon:
                 self.app.icon = "icons/virustotal-{}.png".format(color)
         else:
-            if self.vt_api and self.vt_api.is_unauthorized() or self.vt_api.is_not_found():
+            if self.vt_api and (self.vt_api.is_unauthorized() or self.vt_api.is_not_found()):
                 self.app.icon = "icons/virustotal-gray.png"
             else:
                 self.app.icon = "icons/virustotal.png"
@@ -438,7 +440,7 @@ class VTStats(object):
         self.menu_prefs_user_id.state = 1 if self.user_id else 0
         self.menu_prefs_notify.state = 1 if self.notify_usage else 0
 
-        if self.vt_api and self.vt_api.is_unauthorized() or self.vt_api.is_not_found():
+        if self.vt_api and (self.vt_api.is_unauthorized() or self.vt_api.is_not_found()):
             self.menu_update.set_callback(None)
         elif not self.vt_api:
             self.menu_update.set_callback(None)
