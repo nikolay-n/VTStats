@@ -138,7 +138,7 @@ class VtApi:
         req = urllib.request.Request(url, headers=headers)
         stats = None
         try:
-            res = urllib.request.urlopen(req)
+            res = urllib.request.urlopen(req, timeout=30)
             body = res.read()
             stats = json.loads(body)
             self.last_code = res.code
